@@ -1,0 +1,21 @@
+syntax = "proto3";
+
+option go_package = "github.com/fabrizioperria/blockchain/proto";
+
+message Block {
+    Header header = 1;
+    repeated Transaction transaction = 2;
+}
+
+message Header {
+    int32 version = 1;
+    int32 height = 2;
+    bytes previousHash = 3;
+    bytes merkleRoot = 4;
+    int64 timestamp = 5;
+}
+
+message Transaction {
+
+}
+
