@@ -4,10 +4,12 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/hex"
+	"fmt"
 	"io"
 )
 
 const (
+	signatureSize  = ed25519.SignatureSize
 	privateKeySize = ed25519.PrivateKeySize
 	publicKeySize  = ed25519.PublicKeySize
 	seedSize       = ed25519.SeedSize
@@ -63,6 +65,16 @@ func (p *PublicKey) Bytes() []byte {
 	return p.key
 }
 
+func PublicKeyFromBytes(data []byte) *PublicKey {
+	if len(data) != publicKeySize {
+		panic(fmt.Errorf(`invalid public key size. Size must be %d, but got %d`, publicKeySize, len(data)))
+	}
+
+	return &PublicKey{
+		key: ed25519.PublicKey(data),
+	}
+}
+
 // ====================================================================================================
 
 type Signature struct {
@@ -71,6 +83,15 @@ type Signature struct {
 
 func (s *Signature) Bytes() []byte {
 	return s.data
+}
+
+func SignatureFromBytes(data []byte) *Signature {
+	if len(data) != signatureSize {
+		panic(fmt.Errorf(`invalid signature size. Size must be %d, but got %d`, signatureSize, len(data)))
+	}
+	return &Signature{
+		data: data,
+	}
 }
 
 func (s *Signature) Verify(pubKey *PublicKey, data []byte) bool {
