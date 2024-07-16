@@ -2,10 +2,13 @@ package node
 
 import (
 	"context"
+	"fmt"
 	"net"
+	"strings"
 	"sync"
 
-	"github.com/beevik/guid"
+	// "sync"
+
 	"github.com/fabrizioperria/blockchain/logging"
 	proto "github.com/fabrizioperria/blockchain/protobuf"
 	"github.com/sirupsen/logrus"
@@ -18,29 +21,58 @@ type nodeData struct {
 	height  int32
 }
 
+type addPeerData struct {
+	client *proto.NodeClient
+	data   *proto.HandshakeMsg
+}
+
 type Node struct {
 	proto.UnimplementedNodeServer
-	peers      map[proto.NodeClient]*proto.HandshakeMsg
-	logger     *logrus.Logger
-	version    string
-	listenAddr string
-	id         string
-	peerLock   sync.RWMutex
-	height     int32
+	peers        sync.Map
+	logger       *logrus.Logger
+	addPeerCh    chan *addPeerData
+	removePeerCh chan string
+	getPeersCh   chan chan []string
+	version      string
+	listenAddr   string
+	id           string
+	height       int32
+}
+
+func (n *Node) managePeers() {
+	for {
+		select {
+		case peer := <-n.removePeerCh:
+			n.peers.Delete(peer)
+		case data := <-n.addPeerCh:
+			if data.data.Address != "" {
+				n.peers.Store(data.data.Address, data)
+			}
+		case res := <-n.getPeersCh:
+			peers := []string{}
+			n.peers.Range(func(key, value interface{}) bool {
+				peers = append(peers, key.(string))
+				return true
+			})
+			res <- peers
+		}
+	}
 }
 
 func New() *Node {
 	d := getNodeData()
-	id := guid.New().String()
 
-	return &Node{
-		version:  d.version,
-		height:   d.height,
-		peers:    make(map[proto.NodeClient]*proto.HandshakeMsg),
-		peerLock: sync.RWMutex{},
-		id:       id,
-		logger:   logging.LoggerFactory("logs/" + id + ".log"),
+	n := &Node{
+		version:      d.version,
+		height:       d.height,
+		peers:        sync.Map{},
+		addPeerCh:    make(chan *addPeerData, 100),
+		removePeerCh: make(chan string, 100),
+		getPeersCh:   make(chan chan []string, 100),
 	}
+	go n.managePeers()
+
+	return n
 }
 
 func getNodeData() *nodeData {
@@ -50,8 +82,9 @@ func getNodeData() *nodeData {
 	}
 }
 
-func (n *Node) Start(listenAddr string) {
+func (n *Node) Start(listenAddr string, bootstrapNodes []string) {
 	n.listenAddr = listenAddr
+	n.logger = logging.LoggerFactory("logs/" + strings.ReplaceAll(listenAddr, ":", "") + ".log")
 	opts := []grpc.ServerOption{}
 	grpcServer := grpc.NewServer(opts...)
 
@@ -62,30 +95,31 @@ func (n *Node) Start(listenAddr string) {
 
 	proto.RegisterNodeServer(grpcServer, n)
 
-	n.logger.Info("Server started on port 3000")
+	if err := n.bootstrapConnect(bootstrapNodes); err != nil {
+		n.logger.Fatalf("failed to connect to bootstrap nodes: %v", err)
+	}
+
+	n.logger.Infof("Server started on %s", listenAddr)
 
 	grpcServer.Serve(listener)
 }
 
-func (n *Node) BootstrapConnect(addresses []string) error {
+func (n *Node) bootstrapConnect(addresses []string) error {
+	n.logger.Infof("[%s] Bootstrapping to %v", n.listenAddr, addresses)
 	for _, address := range addresses {
-		client, err := makeNodeClient(address)
-		if err != nil {
-			n.logger.Fatalf("failed to dial server: %v", err)
-			return err
-		}
-
-		msg, err := client.Handshake(context.Background(), &proto.HandshakeMsg{
-			Version: n.version,
-			Height:  n.height,
-			Address: n.listenAddr,
-		})
-		if err != nil {
-			n.logger.Fatalf("failed to make handshake: %v", err)
+		if n.hasConnectedTo(address) {
 			continue
 		}
 
-		n.addPeer(&client, msg)
+		n.logger.WithFields(logrus.Fields{
+			"from":    n.listenAddr,
+			"address": address,
+		}).Info("Bootstrapping to address")
+		client, msg, err := n.dialRemote(address)
+		if err != nil {
+			return err
+		}
+		n.addPeer(client, msg)
 	}
 
 	return nil
@@ -100,13 +134,9 @@ func (n *Node) HandleTransaction(ctx context.Context, transaction *proto.Transac
 }
 
 func (n *Node) Handshake(ctx context.Context, helo *proto.HandshakeMsg) (*proto.HandshakeMsg, error) {
-	n.logger.WithFields(logrus.Fields{
-		"fromAddress": n.listenAddr,
-		"toAddress":   helo.Address,
-		"version":     helo.Version,
-		"height":      helo.Height,
-	}).Info("Received handshake")
-
+	if n.hasConnectedTo(helo.Address) {
+		return nil, nil
+	}
 	client, err := makeNodeClient(helo.Address)
 	if err != nil {
 		n.logger.Fatalf("failed to dial server: %v", err)
@@ -114,34 +144,72 @@ func (n *Node) Handshake(ctx context.Context, helo *proto.HandshakeMsg) (*proto.
 	}
 
 	myMsg := &proto.HandshakeMsg{
-		Version: n.version,
-		Height:  n.height,
-		Address: n.listenAddr,
+		Version:    n.version,
+		Height:     n.height,
+		Address:    n.listenAddr,
+		KnownPeers: n.GetPeers(),
 	}
 	n.addPeer(&client, helo)
 
 	return myMsg, nil
 }
 
+func (n *Node) GetPeers() []string {
+	res := make(chan []string)
+	go func() { n.getPeersCh <- res }()
+	return <-res
+}
+
 func (n *Node) addPeer(peer *proto.NodeClient, data *proto.HandshakeMsg) bool {
-	n.peerLock.Lock()
-	defer n.peerLock.Unlock()
-	n.peers[*peer] = data
+	if n.hasConnectedTo(data.Address) {
+		return false
+	}
+	n.addPeerCh <- &addPeerData{client: peer, data: data}
 	n.logger.WithFields(logrus.Fields{
-		"fromAddress": n.listenAddr,
-		"toAddress":   data.Address,
-		"version":     data.Version,
-		"height":      data.Height,
+		"receiver":     n.listenAddr,
+		"addedPeer":    data.Address,
+		"theirVersion": data.Version,
+		"theirHeight":  data.Height,
 	}).Info("Added peer")
+
+	go n.bootstrapConnect(data.KnownPeers)
+
 	return true
 }
 
-func (n *Node) removePeer(peer *proto.NodeClient) {
-	n.peerLock.Lock()
-	defer n.peerLock.Unlock()
-	delete(n.peers, *peer)
+func (n *Node) dialRemote(address string) (*proto.NodeClient, *proto.HandshakeMsg, error) {
+	if address == n.listenAddr {
+		return nil, nil, fmt.Errorf("cannot connect to self")
+	}
+	client, err := makeNodeClient(address)
+	if err != nil {
+		return nil, nil, err
+	}
+	msg, err := client.Handshake(context.Background(), &proto.HandshakeMsg{
+		Version:    n.version,
+		Height:     n.height,
+		Address:    n.listenAddr,
+		KnownPeers: n.GetPeers(),
+	})
+	if err != nil {
+		return nil, nil, err
+	}
+	return &client, msg, nil
+}
+
+func (n *Node) hasConnectedTo(address string) bool {
+	if address == n.listenAddr {
+		return true
+	}
+
+	_, ok := n.peers.Load(address)
+	return ok
+}
+
+func (n *Node) removePeer(peer string) {
+	n.removePeerCh <- peer
 	n.logger.WithFields(logrus.Fields{
-		"address": *peer,
+		"address": peer,
 	}).Info("Removed peer")
 }
 

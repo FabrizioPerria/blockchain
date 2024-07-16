@@ -11,7 +11,12 @@ import (
 
 func LoggerFactory(filePath string) *logrus.Logger {
 	l := logrus.New()
-	l.SetFormatter(&logrus.JSONFormatter{})
+	l.SetFormatter(&logrus.TextFormatter{
+		TimestampFormat: "2006-01-02 15:04:05",
+		ForceColors:     true,
+		FullTimestamp:   true,
+		DisableColors:   false,
+	})
 
 	parent := path.Dir(filePath)
 	os.MkdirAll(parent, 0o755)

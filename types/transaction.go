@@ -30,6 +30,9 @@ func VerifyTransaction(transaction *proto.Transaction) bool {
 		signature := crypto.SignatureFromBytes(input.Signature)
 		publicKey := crypto.PublicKeyFromBytes(input.PublicKey)
 
+		// i need to set the input's signatures to nil before verifying the transaction; this is because the signature is not part of the transaction
+		input.Signature = nil
+
 		hash := HashTransactionSHA256(transaction)
 		if !signature.Verify(publicKey, hash) {
 			return false

@@ -2,7 +2,8 @@ package main
 
 import (
 	"context"
-	// "time"
+	"strconv"
+	"time"
 
 	"github.com/fabrizioperria/blockchain/logging"
 	"github.com/fabrizioperria/blockchain/node"
@@ -12,35 +13,40 @@ import (
 )
 
 func main() {
-	makeNode("localhost:3000", []string{})
-	makeNode("localhost:4000", []string{"localhost:3000"})
+	n := []*node.Node{}
+	n = append(n, makeNode("localhost:3000", []string{}))
+	for i := 1; i < 30; i++ {
+		port := 3000 + i
+		n = append(n, makeNode("localhost:"+strconv.Itoa(port), []string{"localhost:3000"}))
+	}
 
-	// go func() {
-	// 	for {
-	// 		time.Sleep(2 * time.Second)
-	// 		makeTransaction()
+	// expectedNumPeers := 9
+	// for i, node := range n {
+	// 	l := len(node.GetPeers())
+	// 	if l != expectedNumPeers {
+	// 		log.Fatalf("[%d] expected %d peers, got %d", i, expectedNumPeers, l)
 	// 	}
-	// }()
+	// }
 
-	select {}
+	time.Sleep(2 * time.Second)
+	for i, node := range n {
+		log.Infof("[%d] peers: %v", i, node.GetPeers())
+	}
+	// select {}
 }
 
 var log = logging.LoggerFactory("logs/log.log")
 
 func makeNode(listenAddr string, bootstrapNodes []string) *node.Node {
 	n := node.New()
-	go n.Start(listenAddr)
-	if len(bootstrapNodes) > 0 {
-		if err := n.BootstrapConnect(bootstrapNodes); err != nil {
-			log.Fatalf("failed to connect to bootstrap nodes: %v", err)
-		}
-	}
+	go n.Start(listenAddr, bootstrapNodes)
+	time.Sleep(1 * time.Second)
 
 	return n
 }
 
-func makeTransaction() {
-	client, err := grpc.NewClient("localhost:3000", grpc.WithTransportCredentials(insecure.NewCredentials()))
+func makeTransaction(clientAddr string) {
+	client, err := grpc.NewClient(clientAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
 	if err != nil {
 		log.Fatalf("failed to dial server: %v", err)
 	}
